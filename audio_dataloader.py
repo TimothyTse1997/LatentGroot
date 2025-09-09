@@ -1,8 +1,9 @@
+import random
 from pathlib import Path
 
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import Dataset, DataLoader, random_split
 
 #import torchaudio
 #import torchaudio.functional as taF
@@ -87,9 +88,9 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
     def __getitem__(self, index):
         data_sect =  index // self.data_len
         data_id = index % self.data_len
-        print(index, self.data_len, data_sect)
-        print(index, self.data_len, data_id)
-        print(len(self.data[data_sect]))
+        # print(index, self.data_len, data_sect)
+        # print(index, self.data_len, data_id)
+        # print(len(self.data[data_sect]))
 
         wav_path = self.data[data_sect][data_id]
         
@@ -126,6 +127,26 @@ class W2VLabeledCollator(W2VBaseCollator):
         
         return inputs, labels
 
+def get_labeled_dataloader(data_paths, sampling_rate=16000, eval_split=0.1, batch_size=16):
+    dataset = WMBinaryClassificationDataset(
+        sampling_rate=sampling_rate, **data_paths)
+    dataset_size = len(dataset)
+    eval_size = max(int(dataset_size * eval_split), 1)
+    train_size = dataset_size - eval_size
+
+    collate_fn = W2VLabeledCollator()
+
+    train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
+    train_dataloader = DataLoader(
+        train_dataset, batch_size=batch_size,
+        collate_fn=collate_fn, shuffle=True
+    )
+    eval_dataloader = DataLoader(
+        eval_dataset, batch_size=batch_size,
+        collate_fn=collate_fn, shuffle=False
+    )
+    return train_dataloader, eval_dataloader
+
 if __name__ == "__main__":
     dummy_dataset = "/home/tst000/projects/LatentGroot/test/dummy_dataset"
     dummy_tts_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
@@ -140,8 +161,10 @@ if __name__ == "__main__":
 
     collate_fn = W2VLabeledCollator()
     debug_dataloader = DataLoader(
-        wm_dataset, batch_size=1,
+        wm_dataset, batch_size=2,
         collate_fn=collate_fn, shuffle=True
     )
-    batch = next(iter(debug_dataloader))
-    print(batch)
+    inputs, labels = next(iter(debug_dataloader))
+    print(inputs.input_values.shape)
+    print(inputs.attention_mask.shape)
+    print(labels.shape)
