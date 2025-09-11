@@ -6,6 +6,7 @@ import librosa
 from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2ForPreTraining
 
 from audioseal.models import AudioSealDetector
+from audioseal.loader import load_model_checkpoint, _update_state_dict
 
 class BaseAudioSealClassifier(AudioSealDetector):
 
@@ -79,6 +80,56 @@ class BaseAudioSealClassifier(AudioSealDetector):
         message = self.decode_message(result[:, 2:, :])
         return result[:, :2, :], message
 
+class DirectAudioSealClassifier(AudioSealDetector):
+    def __init__(
+        self,
+        model_kwargs = {
+            "activation": "ELU",
+            "activation_params": {"alpha": 1.0},
+            "causal": False,
+            "channels": 1,
+            "compress": 2,
+            "dilation_base": 2,
+            "dimension": 128,
+            "disable_norm_outer_blocks": 0,
+            "kernel_size": 7,
+            "last_kernel_size": 7,
+            "lstm": 2,
+            "n_filters": 32,
+            "n_residual_layers": 1,
+            "norm": "weight_norm",
+            "norm_params": {},
+            "pad_mode": "constant",
+            "ratios": [8,5,4,2],
+            "residual_kernel_size": 3,
+            "true_skip": True,
+            "output_dim": 32,
+            "nbits": 16,
+        }
+    ):
+        super().__init__(**model_kwargs)
+        self.loss_fn = nn.NLLLoss()
+
+    def calculate_loss(
+        self, 
+        x: torch.Tensor,
+        labels: torch.Tensor, # binary labels, (B,)
+        sample_rate=None,
+    ):
+        logits = self.get_logit(x, sample_rate=sample_rate)
+        logits = F.log_softmax(logits) # (B, 2)
+        loss = self.loss_fn(logits, labels)
+        return logits, loss
+
+    def get_logit(
+        self, 
+        x: torch.Tensor,
+        sample_rate=None,
+    ):
+        seq_logits, _ = self.forward(x.unsqueeze(1), sample_rate=sample_rate)
+        logits = seq_logits[:, :2, :].mean(-1)
+        return logits
+
 class SLIMEncoder(nn.Module):
     def __init__(self,
             input_dim=1024*2, output_dim=128,
@@ -136,13 +187,24 @@ class SLIMEncoder(nn.Module):
         #proj_latent = self.proj(full_latent) # B, seq_len, output_dim
         return full_latent
 
+def load_from_pretrain(checkpoint_path):
+    # TODO allow use of different confir, not urgent cus there's only one known pretrain model
+    pretrained_audioseal_classifier = DirectAudioSealClassifier()#.cuda()
+    checkpoint = load_model_checkpoint(checkpoint_path)["model"]
+    _update_state_dict(pretrained_audioseal_classifier, checkpoint)
+    return pretrained_audioseal_classifier
+
 if __name__ == "__main__":
-    audioseal_classifier = BaseAudioSealClassifier().cuda()
-    slim_encoder = SLIMEncoder().cuda()
+    #audioseal_classifier = BaseAudioSealClassifier().cuda()
+    checkpoint_path = "/gpfs/fs5/nrc/nrc-fs1/ict/others/u/tst000/.cache/audioseal/94c8df0b1d5ea8e45af4c884"
+    pretrained_audioseal_classifier = load_from_pretrain(checkpoint_path)
+    #slim_encoder = SLIMEncoder().cuda()
     with torch.no_grad():
-        dummy_input = torch.randn((2, 11860)).cuda()
-        dummy_attention_mask = torch.ones((2, 11860)).cuda()
-        dummy_labels = torch.ones((2)).type(torch.LongTensor).cuda()
-        latent = slim_encoder(dummy_input, dummy_attention_mask)
-        logit, loss = audioseal_classifier.calculate_loss(latent, dummy_labels, sample_rate=16000)
+        dummy_input = torch.randn((2, 1186))#.cuda()
+        dummy_attention_mask = torch.ones((2, 1186))#.cuda()
+        dummy_labels = torch.ones((2)).type(torch.LongTensor)#.cuda()
+        #latent = slim_encoder(dummy_input, dummy_attention_mask)
+        #logit, loss = audioseal_classifier.calculate_loss(latent, dummy_labels, sample_rate=16000)
+        logit, loss = pretrained_audioseal_classifier.calculate_loss(
+                dummy_input, dummy_labels, sample_rate=16000)
     pass
