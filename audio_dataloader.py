@@ -6,13 +6,14 @@ import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 
 import torchaudio
-#import torchaudio.functional as taF
+
+# import torchaudio.functional as taF
 
 from transformers import Wav2Vec2FeatureExtractor
 
 import librosa
 
-from audio_augmentation import RandomClip
+from audio_augmentation import RandomClip, RandomAudioAugmentation
 
 
 class BaseAudioDataset(Dataset):
@@ -21,7 +22,7 @@ class BaseAudioDataset(Dataset):
         self.dataset_dir = Path(dataset_dir)
 
         self.data_paths = list(self.dataset_dir.glob("*.wav"))
-    
+
     def __len__(self):
         return len(self.data_paths)
 
@@ -30,11 +31,12 @@ class BaseAudioDataset(Dataset):
         batch = {}
         batch["speech"] = speech_array
         return batch
-    
+
     def __getitem__(self, index):
         wav_path = self.data_paths[index]
         batch = self.load_audio_to_batch(wav_path)
         return batch
+
 
 def random_cycle(iterable):
     # cycle('ABCD') --> A B C D A B C D A B C D ...
@@ -46,11 +48,18 @@ def random_cycle(iterable):
     while saved:
         random.shuffle(saved)
         for element in saved:
-              yield element
+            yield element
+
 
 class WMBinaryClassificationDataset(BaseAudioDataset):
-
-    def __init__(self, wm_data_dir, tts_data_dir, raw_audio_dir, sampling_rate=16000, clip_length=5):
+    def __init__(
+        self,
+        wm_data_dir,
+        tts_data_dir,
+        raw_audio_dir,
+        sampling_rate=16000,
+        clip_length=5,
+    ):
         self.wm_data_dir = Path(wm_data_dir)
         self.tts_data_dir = Path(tts_data_dir)
         self.raw_audio_dir = Path(raw_audio_dir)
@@ -72,11 +81,14 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         self.balance_data_list = list(zip(non_wm_iter, wm_iter))
         self.data = list(zip(*self.balance_data_list))
 
-        assert(len(self.data[0]) == self.data_len)
-        assert(len(self.data[1]) == self.data_len)
+        assert len(self.data[0]) == self.data_len
+        assert len(self.data[1]) == self.data_len
 
-        self.random_clip = RandomClip(self.sampling_rate, clip_length=self.sampling_rate*clip_length)
-    
+        self.random_clip = RandomClip(
+            self.sampling_rate, clip_length=self.sampling_rate * clip_length
+        )
+        self.aug_fn = RandomAudioAugmentation(sample_rate=self.sampling_rate)
+
     def _update_data_iter(self, data_iter):
         if len(data_iter) >= self.data_len:
             return data_iter
@@ -84,13 +96,13 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         return data_iter
 
     def __len__(self):
-        return self.data_len * 2 # loop through all 3 list
+        return self.data_len * 2  # loop through all 3 list
 
     def get_audio_dir_paths(self, raw_audio_dir):
         return list(raw_audio_dir.glob("*.wav")) + list(raw_audio_dir.glob("**/*.wav"))
 
     def __getitem__(self, index):
-        data_sect =  index // self.data_len
+        data_sect = index // self.data_len
         data_id = index % self.data_len
         # print(index, self.data_len, data_sect)
         # print(index, self.data_len, data_id)
@@ -100,13 +112,14 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         batch = self.load_audio_to_batch(wav_path)
 
         batch["speech"] = self.random_clip(torch.from_numpy(batch["speech"])).numpy()
+        batch["speech"] = torch.from_numpy(self.aug_fn(batch["speech"]))
 
         batch["label"] = data_sect
 
         return batch
 
-class W2VBaseCollator:
 
+class W2VBaseCollator:
     def __init__(
         self,
         model_id="r-f/wav2vec-english-speech-emotion-recognition",
@@ -114,15 +127,15 @@ class W2VBaseCollator:
     ):
         self.model_id = model_id
         self.sampling_rate = sampling_rate
-        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
-            self.model_id
-        )
-    
+        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(self.model_id)
+
     def __call__(self, batch):
         audios = [b["speech"] for b in batch]
         inputs = self.feature_extractor(
-            audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True)
+            audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True
+        )
         return inputs
+
 
 class W2VLabeledCollator(W2VBaseCollator):
     def __call__(self, batch):
@@ -130,13 +143,16 @@ class W2VLabeledCollator(W2VBaseCollator):
 
         labels = torch.LongTensor([int(b["label"]) for b in batch])
         inputs = self.feature_extractor(
-            audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True)
-        
+            audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True
+        )
+
         return inputs, labels
 
-def get_labeled_dataloader(data_paths, sampling_rate=16000, eval_split=0.1, batch_size=16):
-    dataset = WMBinaryClassificationDataset(
-        sampling_rate=sampling_rate, **data_paths)
+
+def get_labeled_dataloader(
+    data_paths, sampling_rate=16000, eval_split=0.1, batch_size=16
+):
+    dataset = WMBinaryClassificationDataset(sampling_rate=sampling_rate, **data_paths)
     dataset_size = len(dataset)
     eval_size = max(int(dataset_size * eval_split), 1)
     train_size = dataset_size - eval_size
@@ -145,21 +161,20 @@ def get_labeled_dataloader(data_paths, sampling_rate=16000, eval_split=0.1, batc
 
     train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size,
-        collate_fn=collate_fn, shuffle=True
+        train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True
     )
     eval_dataloader = DataLoader(
-        eval_dataset, batch_size=batch_size,
-        collate_fn=collate_fn, shuffle=False
+        eval_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False
     )
     return train_dataloader, eval_dataloader
+
 
 if __name__ == "__main__":
     dummy_dataset = "/home/tst000/projects/LatentGroot/test/dummy_dataset"
     dummy_tts_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
     dummy_raw_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
 
-    #dataset = BaseAudioDataset(dataset_dir=dummy_dataset)
+    # dataset = BaseAudioDataset(dataset_dir=dummy_dataset)
     wm_dataset = WMBinaryClassificationDataset(
         wm_data_dir=dummy_dataset,
         tts_data_dir=dummy_tts_dataset,
@@ -169,8 +184,7 @@ if __name__ == "__main__":
 
     collate_fn = W2VLabeledCollator()
     debug_dataloader = DataLoader(
-        wm_dataset, batch_size=2,
-        collate_fn=collate_fn, shuffle=True
+        wm_dataset, batch_size=2, collate_fn=collate_fn, shuffle=True
     )
     inputs, labels = next(iter(debug_dataloader))
     print(inputs.input_values.shape)
