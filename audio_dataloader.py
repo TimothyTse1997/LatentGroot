@@ -5,12 +5,14 @@ import torch
 import torch.nn as nn
 from torch.utils.data import Dataset, DataLoader, random_split
 
-#import torchaudio
+import torchaudio
 #import torchaudio.functional as taF
 
 from transformers import Wav2Vec2FeatureExtractor
 
 import librosa
+
+from audio_augmentation import RandomClip
 
 
 class BaseAudioDataset(Dataset):
@@ -48,7 +50,7 @@ def random_cycle(iterable):
 
 class WMBinaryClassificationDataset(BaseAudioDataset):
 
-    def __init__(self, wm_data_dir, tts_data_dir, raw_audio_dir, sampling_rate=16000):
+    def __init__(self, wm_data_dir, tts_data_dir, raw_audio_dir, sampling_rate=16000, clip_length=5):
         self.wm_data_dir = Path(wm_data_dir)
         self.tts_data_dir = Path(tts_data_dir)
         self.raw_audio_dir = Path(raw_audio_dir)
@@ -72,6 +74,8 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
 
         assert(len(self.data[0]) == self.data_len)
         assert(len(self.data[1]) == self.data_len)
+
+        self.random_clip = RandomClip(self.sampling_rate, clip_length=self.sampling_rate*clip_length)
     
     def _update_data_iter(self, data_iter):
         if len(data_iter) >= self.data_len:
@@ -93,8 +97,10 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         # print(len(self.data[data_sect]))
 
         wav_path = self.data[data_sect][data_id]
-        
         batch = self.load_audio_to_batch(wav_path)
+
+        batch["speech"] = self.random_clip(torch.from_numpy(batch["speech"])).numpy()
+
         batch["label"] = data_sect
 
         return batch
@@ -121,7 +127,8 @@ class W2VBaseCollator:
 class W2VLabeledCollator(W2VBaseCollator):
     def __call__(self, batch):
         audios = [b["speech"] for b in batch]
-        labels = torch.LongTensor([b["label"] for b in batch])
+
+        labels = torch.LongTensor([int(b["label"]) for b in batch])
         inputs = self.feature_extractor(
             audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True)
         
@@ -156,7 +163,8 @@ if __name__ == "__main__":
     wm_dataset = WMBinaryClassificationDataset(
         wm_data_dir=dummy_dataset,
         tts_data_dir=dummy_tts_dataset,
-        raw_audio_dir=dummy_raw_dataset
+        raw_audio_dir=dummy_raw_dataset,
+        clip_length=1,
     )
 
     collate_fn = W2VLabeledCollator()

@@ -52,7 +52,6 @@ class BaseAudioSealClassifier(AudioSealDetector):
         seq_logits, _ = self.forward(x, sample_rate=sample_rate)
         logits = seq_logits[:, :2, :].mean(-1)
         logits = F.log_softmax(logits) # (B, 2)
-        print(logits.shape, logits)
         loss = self.loss_fn(logits, labels)
         return logits, loss
     
@@ -145,7 +144,5 @@ if __name__ == "__main__":
         dummy_attention_mask = torch.ones((2, 11860)).cuda()
         dummy_labels = torch.ones((2)).type(torch.LongTensor).cuda()
         latent = slim_encoder(dummy_input, dummy_attention_mask)
-        print(latent.shape)
         logit, loss = audioseal_classifier.calculate_loss(latent, dummy_labels, sample_rate=16000)
-    print(logit, loss)
     pass
