@@ -59,24 +59,33 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         raw_audio_dir,
         sampling_rate=16000,
         clip_length=5,
+        drop_raw_data=False,
     ):
         self.wm_data_dir = Path(wm_data_dir)
         self.tts_data_dir = Path(tts_data_dir)
-        self.raw_audio_dir = Path(raw_audio_dir)
 
         self.sampling_rate = sampling_rate
 
         self.wm_data = self.get_audio_dir_paths(self.wm_data_dir)
         self.tts_data = self.get_audio_dir_paths(self.tts_data_dir)
-        self.raw_audio = self.get_audio_dir_paths(self.raw_audio_dir)
 
-        self.data_len = max(
-            len(self.wm_data),
-            len(self.tts_data) + len(self.raw_audio),
-        )
+        if not drop_raw_data:
+            self.raw_audio_dir = Path(raw_audio_dir)
+            self.raw_audio = self.get_audio_dir_paths(self.raw_audio_dir)
+
+            self.data_len = max(
+                len(self.wm_data),
+                len(self.tts_data) + len(self.raw_audio),
+            )
+        else:
+            self.data_len = max(len(self.wm_data), len(self.tts_data))
 
         wm_iter = self._update_data_iter(self.wm_data)
-        non_wm_iter = self._update_data_iter(self.tts_data + self.raw_audio)
+
+        if not drop_raw_data:
+            non_wm_iter = self._update_data_iter(self.tts_data + self.raw_audio)
+        else:
+            non_wm_iter = self._update_data_iter(self.tts_data)
 
         self.balance_data_list = list(zip(non_wm_iter, wm_iter))
         self.data = list(zip(*self.balance_data_list))
@@ -112,7 +121,7 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         batch = self.load_audio_to_batch(wav_path)
 
         batch["speech"] = self.random_clip(torch.from_numpy(batch["speech"])).numpy()
-        batch["speech"] = torch.from_numpy(self.aug_fn(batch["speech"]))
+        batch["speech"] = self.aug_fn(batch["speech"])
 
         batch["label"] = data_sect
 
@@ -150,9 +159,11 @@ class W2VLabeledCollator(W2VBaseCollator):
 
 
 def get_labeled_dataloader(
-    data_paths, sampling_rate=16000, eval_split=0.1, batch_size=16
+    data_paths, sampling_rate=16000, eval_split=0.1, batch_size=16, drop_raw_data=False
 ):
-    dataset = WMBinaryClassificationDataset(sampling_rate=sampling_rate, **data_paths)
+    dataset = WMBinaryClassificationDataset(
+        sampling_rate=sampling_rate, drop_raw_data=drop_raw_data, **data_paths
+    )
     dataset_size = len(dataset)
     eval_size = max(int(dataset_size * eval_split), 1)
     train_size = dataset_size - eval_size

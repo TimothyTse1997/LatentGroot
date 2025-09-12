@@ -45,7 +45,8 @@ class RandomAudioAugmentation:
             ],
             "default": [{}],
         },
-        clip_range=[0.85, 1.0],
+        min_length=3,
+        clip_range=[0.9, 1.0],
         sample_rate=16000,
     ):
         self.sample_rate = sample_rate
@@ -54,14 +55,18 @@ class RandomAudioAugmentation:
         self.aug_names = list(self.aug_dict.keys())
         self.clip_range = clip_range
         self.perturber = AudioPerturbations(sample_rate=self.sample_rate)
+        self.min_length = min_length * self.sample_rate
 
     def custom_clip(self, audio_data):
         audio_length = audio_data.shape[0]
+        if audio_length <= self.min_length:
+            return audio_data
+
         clip_frac = random.uniform(*self.clip_range)
         assert clip_frac <= 1
         length = int(audio_length * clip_frac)
 
-        cliper = RandomClip(self.sample_rate, length)
+        cliper = RandomClip(self.sample_rate, self.sample_rate * length)
         return cliper(audio_data)
 
     def __call__(self, audio_data):
@@ -73,7 +78,9 @@ class RandomAudioAugmentation:
         aug_param = random.choice(self.aug_dict[aug_name])
 
         perturbed = self.perturber.apply_perturbation(audio_data, aug_name, **aug_param)
-        return torch.from_numpy(perturbed)
+        # return torch.from_numpy(perturbed)
+
+        return perturbed
         # for aug_name in random.sample(
         #    self.aug_names, self.num_aug_per_sample
         # ):
@@ -636,7 +643,7 @@ if __name__ == "__main__":
 
     aug_fn = RandomAudioAugmentation(sample_rate=sampling_rate)
     speech_array = aug_fn.custom_clip(torch.from_numpy(speech_array)).numpy()
-    speech_array = aug_fn(speech_array)
+    speech_array = torch.from_numpy(aug_fn(speech_array))
     print(speech_array.shape)
 
     torchaudio.save(
