@@ -30,7 +30,7 @@ def define_scheduler(optimizer, params):
 def build_optimizer(model, scheduler_params_dict):
     optim = AdamW(
         model.parameters(),
-        lr=5e-4,
+        lr=1e-3,
         weight_decay=1e-4,
         betas=(0.0, 0.99),
         eps=1e-9,

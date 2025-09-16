@@ -1,0 +1,17 @@
+[
+  {
+    "trainer_name": "BaseTrainer",
+    "trainer_kwargs": {
+      "data_paths": {
+        "wm_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/watermarked",
+        "tts_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/original",
+        "raw_audio_dir": ""
+      },
+      "batch_size": 16,
+      "checkpoint_dir": "/home/tst000/projects/checkpoint/latent_groot/",
+      "epochs": 100,
+      "drop_raw_data": true,
+      "clip_length": 5
+    }
+  }
+]

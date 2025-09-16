@@ -1,0 +1,17 @@
+[
+  {
+    "trainer_name": "RawAudioTrainer",
+    "trainer_kwargs": {
+      "data_paths": {
+        "wm_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/watermarked",
+        "tts_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/original",
+        "raw_audio_dir": ""
+      },
+      "batch_size": 128,
+      "checkpoint_dir": "/home/tst000/projects/checkpoint/non_latent_groot/",
+      "epochs": 100
+      "drop_raw_data": true
+      "pretrain_checkpoint_path": "/gpfs/fs5/nrc/nrc-fs1/ict/others/u/tst000/.cache/audioseal/94c8df0b1d5ea8e45af4c884"
+    }
+  }
+]

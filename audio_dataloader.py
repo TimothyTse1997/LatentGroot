@@ -1,8 +1,12 @@
+from tqdm import tqdm
 import random
 from pathlib import Path
+import time
 
+import numpy as np
 import torch
 import torch.nn as nn
+from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, DataLoader, random_split
 
 import torchaudio
@@ -58,7 +62,7 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         tts_data_dir,
         raw_audio_dir,
         sampling_rate=16000,
-        clip_length=5,
+        clip_length=8,
         drop_raw_data=False,
     ):
         self.wm_data_dir = Path(wm_data_dir)
@@ -136,14 +140,27 @@ class W2VBaseCollator:
     ):
         self.model_id = model_id
         self.sampling_rate = sampling_rate
-        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(self.model_id)
+        self.feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(
+            self.model_id, local_files_only=True
+        )
 
     def __call__(self, batch):
         audios = [b["speech"] for b in batch]
+        start = time.time()
         inputs = self.feature_extractor(
             audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True
         )
+        print(time.time() - start)
         return inputs
+
+
+class RawAudioCollator:
+    def __call__(self, batch):
+        audios = pad_sequence(
+            [torch.from_numpy(b["speech"]) for b in batch], batch_first=True
+        ).float()
+        labels = torch.LongTensor([int(b["label"]) for b in batch])
+        return audios, labels
 
 
 class W2VLabeledCollator(W2VBaseCollator):
@@ -159,23 +176,43 @@ class W2VLabeledCollator(W2VBaseCollator):
 
 
 def get_labeled_dataloader(
-    data_paths, sampling_rate=16000, eval_split=0.1, batch_size=16, drop_raw_data=False
+    data_paths,
+    sampling_rate=16000,
+    eval_split=0.1,
+    batch_size=16,
+    drop_raw_data=False,
+    clip_length=8,
+    num_workers=16,
+    use_wav_feature=True,
 ):
     dataset = WMBinaryClassificationDataset(
-        sampling_rate=sampling_rate, drop_raw_data=drop_raw_data, **data_paths
+        sampling_rate=sampling_rate,
+        drop_raw_data=drop_raw_data,
+        clip_length=clip_length,
+        **data_paths,
     )
     dataset_size = len(dataset)
     eval_size = max(int(dataset_size * eval_split), 1)
     train_size = dataset_size - eval_size
 
-    collate_fn = W2VLabeledCollator()
+    num_workers = min(batch_size, num_workers)
+    if use_wav_feature:
+        collate_fn = W2VLabeledCollator()
+    else:
+        collate_fn = RawAudioCollator()
 
     train_dataset, eval_dataset = random_split(dataset, [train_size, eval_size])
     train_dataloader = DataLoader(
-        train_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=True
+        train_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=True,  # num_workers=num_workers
     )
     eval_dataloader = DataLoader(
-        eval_dataset, batch_size=batch_size, collate_fn=collate_fn, shuffle=False
+        eval_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=False,  # num_workers=num_workers
     )
     return train_dataloader, eval_dataloader
 
@@ -190,14 +227,17 @@ if __name__ == "__main__":
         wm_data_dir=dummy_dataset,
         tts_data_dir=dummy_tts_dataset,
         raw_audio_dir=dummy_raw_dataset,
-        clip_length=1,
+        drop_raw_data=True,
+        clip_length=5,
     )
 
+    # collate_fn = RawAudioCollator()
     collate_fn = W2VLabeledCollator()
     debug_dataloader = DataLoader(
-        wm_dataset, batch_size=2, collate_fn=collate_fn, shuffle=True
+        wm_dataset, batch_size=32, collate_fn=collate_fn, shuffle=True
     )
-    inputs, labels = next(iter(debug_dataloader))
-    print(inputs.input_values.shape)
-    print(inputs.attention_mask.shape)
-    print(labels.shape)
+    for i in tqdm(range(100)):
+        inputs, labels = next(iter(debug_dataloader))
+        print(inputs)
+        # print(inputs.attention_mask.shape)
+        # print(labels.shape)

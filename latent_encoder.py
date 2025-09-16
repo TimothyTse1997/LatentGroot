@@ -3,17 +3,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 import librosa
-from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor, Wav2Vec2ForPreTraining
+from transformers import (
+    Wav2Vec2ForCTC,
+    Wav2Vec2Processor,
+    Wav2Vec2ForPreTraining,
+    Wav2Vec2ForSequenceClassification,
+)
 
 from audioseal.models import AudioSealDetector
 from audioseal.loader import load_model_checkpoint, _update_state_dict
 
-class BaseAudioSealClassifier(AudioSealDetector):
 
+class BaseAudioSealClassifier(AudioSealDetector):
     def __init__(
         self,
-        input_dim=1024*2,
-        model_kwargs = {
+        input_dim=1024 * 2,
+        model_kwargs={
             "activation": "ELU",
             "activation_params": {"alpha": 1.0},
             "causal": False,
@@ -30,36 +35,36 @@ class BaseAudioSealClassifier(AudioSealDetector):
             "norm": "weight_norm",
             "norm_params": {},
             "pad_mode": "constant",
-            "ratios": [8,5,4,2],
+            "ratios": [8, 5, 4, 2],
             "residual_kernel_size": 3,
             "true_skip": True,
             "output_dim": 32,
             "nbits": 10,
-        }
+        },
     ):
         super().__init__(**model_kwargs)
         self.loss_fn = nn.NLLLoss()
         self.input_dim = input_dim
         self.proj = nn.Linear(input_dim, model_kwargs["dimension"])
         pass
-  
+
     def calculate_loss(
-        self, 
+        self,
         x: torch.Tensor,
-        labels: torch.Tensor, # binary labels, (B,)
+        labels: torch.Tensor,  # binary labels, (B,)
         sample_rate=None,
     ):
-        x = self.proj(x).permute(0, 2, 1) # B, output_dim, seq_len
+        x = self.proj(x).permute(0, 2, 1)  # B, output_dim, seq_len
         seq_logits, _ = self.forward(x, sample_rate=sample_rate)
         logits = seq_logits[:, :2, :].mean(-1)
-        logits = F.log_softmax(logits) # (B, 2)
+        logits = F.log_softmax(logits)  # (B, 2)
         loss = self.loss_fn(logits, labels)
         return logits, loss
-    
+
     def forward(
         self,
         x: torch.Tensor,
-        sample_rate= None,
+        sample_rate=None,
     ):
         """
         Detect the watermarks from the audio signal
@@ -76,14 +81,15 @@ class BaseAudioSealClassifier(AudioSealDetector):
         result = self.detector(x)  # b x 2+nbits
         # REMOVED hardcode softmax on 2 first units used for detection
 
-        #result[:, :2, :] = torch.softmax(result[:, :2, :], dim=1)
+        # result[:, :2, :] = torch.softmax(result[:, :2, :], dim=1)
         message = self.decode_message(result[:, 2:, :])
         return result[:, :2, :], message
+
 
 class DirectAudioSealClassifier(AudioSealDetector):
     def __init__(
         self,
-        model_kwargs = {
+        model_kwargs={
             "activation": "ELU",
             "activation_params": {"alpha": 1.0},
             "causal": False,
@@ -100,29 +106,29 @@ class DirectAudioSealClassifier(AudioSealDetector):
             "norm": "weight_norm",
             "norm_params": {},
             "pad_mode": "constant",
-            "ratios": [8,5,4,2],
+            "ratios": [8, 5, 4, 2],
             "residual_kernel_size": 3,
             "true_skip": True,
             "output_dim": 32,
             "nbits": 16,
-        }
+        },
     ):
         super().__init__(**model_kwargs)
         self.loss_fn = nn.NLLLoss()
 
     def calculate_loss(
-        self, 
+        self,
         x: torch.Tensor,
-        labels: torch.Tensor, # binary labels, (B,)
+        labels: torch.Tensor,  # binary labels, (B,)
         sample_rate=None,
     ):
         logits = self.get_logit(x, sample_rate=sample_rate)
-        logits = F.log_softmax(logits) # (B, 2)
+        logits = F.log_softmax(logits)  # (B, 2)
         loss = self.loss_fn(logits, labels)
         return logits, loss
 
     def get_logit(
-        self, 
+        self,
         x: torch.Tensor,
         sample_rate=None,
     ):
@@ -130,21 +136,27 @@ class DirectAudioSealClassifier(AudioSealDetector):
         logits = seq_logits[:, :2, :].mean(-1)
         return logits
 
+
 class SLIMEncoder(nn.Module):
-    def __init__(self,
-            input_dim=1024*2, output_dim=128,
-            style_latent_layers=(0, 11),
-            ling_latent_layers=(12, 22),
-            **kwargs
-        ):
+    def __init__(
+        self,
+        input_dim=1024 * 2,
+        output_dim=128,
+        style_latent_layers=(0, 11),
+        ling_latent_layers=(12, 22),
+        **kwargs,
+    ):
         super().__init__()
         self.style_latent_layers = style_latent_layers
         self.ling_latent_layers = ling_latent_layers
         self.output_dim = output_dim
-        self.style_encoder = Wav2Vec2ForPreTraining.from_pretrained(
-                "r-f/wav2vec-english-speech-emotion-recognition")
+        # self.style_encoder = Wav2Vec2ForPreTraining.from_pretrained(
+        self.style_encoder = Wav2Vec2ForSequenceClassification.from_pretrained(
+            "r-f/wav2vec-english-speech-emotion-recognition", local_files_only=True
+        )
         self.ling_encoder = Wav2Vec2ForCTC.from_pretrained(
-                "jonatasgrosman/wav2vec2-large-xlsr-53-english")
+            "jonatasgrosman/wav2vec2-large-xlsr-53-english", local_files_only=True
+        )
         self.freeze_encoders()
 
     def freeze_encoders(self):
@@ -155,12 +167,12 @@ class SLIMEncoder(nn.Module):
 
     def _mean_latent(self, latents: list):
         return torch.stack(latents).permute(1, 0, 2, 3).mean(1)
-    
-    #def checkpoint(self, checkpoint_path):
+
+    # def checkpoint(self, checkpoint_path):
     #    # We ONLY save the projection layer
     #    torch.save(self.proj.state_dict(), checkpoint_path)
-    
-    #def load_from_checkpoint(self, checkpoint_path):
+
+    # def load_from_checkpoint(self, checkpoint_path):
     #    # We ONLY load the projection layer
     #    self.proj.load_state_dict(
     #        torch.load(checkpoint_path, weights_only=True)
@@ -168,43 +180,69 @@ class SLIMEncoder(nn.Module):
 
     def forward(self, input_values, attention_mask):
         # ling encoding list[(B, seq_len, H)]
-        ling_latents = self.ling_encoder(input_values, attention_mask=attention_mask, output_hidden_states=True).hidden_states
+        ling_latents = self.ling_encoder(
+            input_values, attention_mask=attention_mask, output_hidden_states=True
+        ).hidden_states
         ling_latent = self._mean_latent(
-            ling_latents[
-                self.ling_latent_layers[0]:
-                self.ling_latent_layers[1]
-            ])
+            ling_latents[self.ling_latent_layers[0] : self.ling_latent_layers[1]]
+        )
 
         # style encoding list[(B, seq_len, H)]
-        style_latents = self.style_encoder(input_values, attention_mask=attention_mask, output_hidden_states=True).hidden_states
+        style_latents = self.style_encoder(
+            input_values, attention_mask=attention_mask, output_hidden_states=True
+        ).hidden_states
         style_latent = self._mean_latent(
-            style_latents[
-                self.style_latent_layers[0]:
-                self.style_latent_layers[1]
-            ])
+            style_latents[self.style_latent_layers[0] : self.style_latent_layers[1]]
+        )
 
-        full_latent = torch.cat((style_latent, ling_latent), dim=-1) # B, seq_len, 2H
-        #proj_latent = self.proj(full_latent) # B, seq_len, output_dim
+        full_latent = torch.cat((style_latent, ling_latent), dim=-1)  # B, seq_len, 2H
+        # proj_latent = self.proj(full_latent) # B, seq_len, output_dim
         return full_latent
+
 
 def load_from_pretrain(checkpoint_path):
     # TODO allow use of different confir, not urgent cus there's only one known pretrain model
-    pretrained_audioseal_classifier = DirectAudioSealClassifier()#.cuda()
+    pretrained_audioseal_classifier = DirectAudioSealClassifier()  # .cuda()
     checkpoint = load_model_checkpoint(checkpoint_path)["model"]
     _update_state_dict(pretrained_audioseal_classifier, checkpoint)
     return pretrained_audioseal_classifier
 
+
+class HalfFreezeW2VClassifier(nn.Module):
+    def __init__(self, *args, **kwargs):
+        super().__init__()
+        self.transformer = Wav2Vec2ForSequenceClassification.from_pretrained(
+            "r-f/wav2vec-english-speech-emotion-recognition",
+            local_files_only=True,
+            num_labels=2,
+        )
+
+    def calculate_loss(
+        self,
+        input_values,
+        attention_mask,
+        labels: torch.Tensor,  # binary labels, (B,)
+    ):
+        out = self.transformer(
+            input_values, attention_mask=attention_mask, labels=labels
+        )
+        logits = out.logits
+        loss = out.loss
+        return logits, loss
+
+
 if __name__ == "__main__":
-    #audioseal_classifier = BaseAudioSealClassifier().cuda()
+    # audioseal_classifier = BaseAudioSealClassifier().cuda()
     checkpoint_path = "/gpfs/fs5/nrc/nrc-fs1/ict/others/u/tst000/.cache/audioseal/94c8df0b1d5ea8e45af4c884"
     pretrained_audioseal_classifier = load_from_pretrain(checkpoint_path)
-    #slim_encoder = SLIMEncoder().cuda()
+    # slim_encoder = SLIMEncoder().cuda()
     with torch.no_grad():
-        dummy_input = torch.randn((2, 1186))#.cuda()
-        dummy_attention_mask = torch.ones((2, 1186))#.cuda()
-        dummy_labels = torch.ones((2)).type(torch.LongTensor)#.cuda()
-        #latent = slim_encoder(dummy_input, dummy_attention_mask)
-        #logit, loss = audioseal_classifier.calculate_loss(latent, dummy_labels, sample_rate=16000)
+        dummy_input = torch.randn((2, 1186))  # .cuda()
+        dummy_attention_mask = torch.ones((2, 1186))  # .cuda()
+        dummy_labels = torch.ones((2)).type(torch.LongTensor)  # .cuda()
+        # latent = slim_encoder(dummy_input, dummy_attention_mask)
+        # logit, loss = audioseal_classifier.calculate_loss(latent, dummy_labels, sample_rate=16000)
         logit, loss = pretrained_audioseal_classifier.calculate_loss(
-                dummy_input, dummy_labels, sample_rate=16000)
+            dummy_input, dummy_labels, sample_rate=16000
+        )
     pass
