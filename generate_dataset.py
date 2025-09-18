@@ -80,9 +80,9 @@ def main(
     noise_update_fn=None,
     fix_codec=[0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
 ):
-    text_dataset = load_dataset(
-        "agentlans/high-quality-english-sentences", split="test"
-    )["text"]
+    text_dataset = load_dataset("agentlans/high-quality-english-sentences")["test"][
+        "text"
+    ]
 
     if not output_dir.exists():
         output_dir.mkdir(parents=True)
@@ -141,9 +141,9 @@ def main_parallel(
     noise_update_fn=None,
     fix_codec=[0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
 ):
-    text_dataset = load_dataset(
-        "agentlans/high-quality-english-sentences", split="test"
-    )["text"]
+    text_dataset = load_dataset("agentlans/high-quality-english-sentences")["test"][
+        "text"
+    ]
 
     if not output_dir.exists():
         output_dir.mkdir(parents=True)
@@ -281,18 +281,19 @@ if __name__ == "__main__":
     #    output_dir = Path("/home/tst000/projects/datasets/LibriTTS_synthesize/dev_watermarked_fix_noise/"),
     #    noise_update_fn=watermark_fn
     # )
-    noise_save_path
+    # noise_save_path
+
     fix_noise_wm_fn = FixNoiseWatermark()
     fix_noise_wm_fn.save_original_noise(
-        "/home/tst000/projects/datasets/LibriTTS_synthesize/"
+        "/home/tst000/projects/datasets/LibriTTS_synthesize/wm_noise.pt"
     )
-    # main_parallel(
-    #    tts_dataset_path=Path(
-    #        "/home/tst000/projects/datasets/LibriTTS/train-clean-100/"
-    #    ),
-    #    output_dir=Path(
-    #        "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/"
-    #    ),
-    #    noise_update_fn=fix_noise_wm_fn,
-    # )
-    main_parallel_load_from_meta()
+    main_parallel(
+        tts_dataset_path=Path(
+            "/home/tst000/projects/datasets/LibriTTS/train-clean-100/"
+        ),
+        output_dir=Path(
+            "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise_2/"
+        ),
+        noise_update_fn=fix_noise_wm_fn,
+    )
+    # main_parallel_load_from_meta()
