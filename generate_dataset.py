@@ -29,6 +29,12 @@ class FixNoiseWatermark:
             self.fix_noise_size = self.fix_noise.shape
         pass
 
+    def save_original_noise(self, save_path):
+        torch.save(self.fix_noise, save_path)
+
+    def load_original_noise(self, save_path):
+        self.fix_noise = torch.load(save_path)
+
     @torch.no_grad()
     def __call__(self, y0, **kwargs):
         batch_size, seq_len, num_channels = y0.shape
@@ -226,6 +232,48 @@ def main_parallel(
     save_jsonl(all_wm_meta_data, output_dir / "wm_meta_data.jsonl")
 
 
+def main_parallel_load_from_meta(
+    tts_meta_data_fname,
+    output_dir=Path(
+        "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel/"
+    ),
+    noise_update_fn=None,
+):
+    tts_meta_data = json.load(open(tts_meta_data_fname, "r"))
+    all_wm_meta_data = []
+
+    f5tts = F5TTS()
+    for _, m in enumerate(tqdm(tts_meta_data)):
+
+        tts_path = Path(m["file_wave"])
+
+        text_id = tts_path.name.split("_")[3]
+        speaker = tts_path.name.split("_")[1]
+        ref_index = tts_path.name.split("_")[-1].split(".")[0]
+
+        wm_save_path = output_dir / f"spk_{speaker}_txt_{text_id}_ref_{ref_index}.wav"
+
+        wm_meta_data = {
+            "ref_file": m["ref_file"],
+            "ref_text": m["ref_text"],
+            "gen_text": m["gen_text"],
+            "file_wave": str(wm_save_path.absolute()),
+            "codec": [],
+        }
+
+        _ = f5tts.infer(
+            ref_file=str(m["ref_file"]),
+            ref_text=str(m["ref_text"]),
+            gen_text=str(m["gen_text"]),
+            file_wave=wm_save_path.absolute(),
+            seed=None,
+        )
+        del _
+        all_wm_meta_data.append(wm_meta_data)
+
+    save_jsonl(all_wm_meta_data, output_dir / "wm_meta_data.jsonl")
+
+
 if __name__ == "__main__":
     # main()
     # main(
@@ -233,13 +281,18 @@ if __name__ == "__main__":
     #    output_dir = Path("/home/tst000/projects/datasets/LibriTTS_synthesize/dev_watermarked_fix_noise/"),
     #    noise_update_fn=watermark_fn
     # )
+    noise_save_path
     fix_noise_wm_fn = FixNoiseWatermark()
-    main_parallel(
-        tts_dataset_path=Path(
-            "/home/tst000/projects/datasets/LibriTTS/train-clean-100/"
-        ),
-        output_dir=Path(
-            "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/"
-        ),
-        noise_update_fn=fix_noise_wm_fn,
+    fix_noise_wm_fn.save_original_noise(
+        "/home/tst000/projects/datasets/LibriTTS_synthesize/"
     )
+    # main_parallel(
+    #    tts_dataset_path=Path(
+    #        "/home/tst000/projects/datasets/LibriTTS/train-clean-100/"
+    #    ),
+    #    output_dir=Path(
+    #        "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/"
+    #    ),
+    #    noise_update_fn=fix_noise_wm_fn,
+    # )
+    main_parallel_load_from_meta()

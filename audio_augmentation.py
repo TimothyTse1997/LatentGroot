@@ -80,10 +80,12 @@ class RandomAudioAugmentation:
         aug_name = random.choice(self.aug_names)
         aug_param = random.choice(self.aug_dict[aug_name])
 
-        perturbed = self.perturber.apply_perturbation(audio_data, aug_name, **aug_param)
+        perturbed, aug_name = self.perturber.apply_perturbation(
+            audio_data, aug_name, **aug_param
+        )
         # return torch.from_numpy(perturbed)
 
-        return perturbed
+        return perturbed, aug_name
         # for aug_name in random.sample(
         #    self.aug_names, self.num_aug_per_sample
         # ):
@@ -574,10 +576,13 @@ class AudioPerturbations:
             raise ValueError(f"Unknown perturbation: {perturbation_name}")
 
         try:
-            return perturbation_map[perturbation_name](audio, **kwargs)
+            return (
+                perturbation_map[perturbation_name](audio, **kwargs),
+                perturbation_name,
+            )
         except Exception as e:
             warnings.warn(f"Failed to apply {perturbation_name}: {e}")
-            return audio  # Return original audio if perturbation fails
+            return audio, "default"  # Return original audio if perturbation fails
 
 
 def main(audio_file, save_dir):

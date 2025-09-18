@@ -150,12 +150,15 @@ class SLIMEncoder(nn.Module):
         self.style_latent_layers = style_latent_layers
         self.ling_latent_layers = ling_latent_layers
         self.output_dim = output_dim
-        # self.style_encoder = Wav2Vec2ForPreTraining.from_pretrained(
         self.style_encoder = Wav2Vec2ForSequenceClassification.from_pretrained(
-            "r-f/wav2vec-english-speech-emotion-recognition", local_files_only=True
+            "r-f/wav2vec-english-speech-emotion-recognition",
+            local_files_only=True,
+            attn_implementation="sdpa",
         )
         self.ling_encoder = Wav2Vec2ForCTC.from_pretrained(
-            "jonatasgrosman/wav2vec2-large-xlsr-53-english", local_files_only=True
+            "jonatasgrosman/wav2vec2-large-xlsr-53-english",
+            local_files_only=True,
+            attn_implementation="sdpa",
         )
         self.freeze_encoders()
 

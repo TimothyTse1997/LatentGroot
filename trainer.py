@@ -7,10 +7,13 @@ from tqdm.auto import tqdm
 import sys
 import traceback
 
+import matplotlib.pyplot as plt
+
 import torchaudio
 
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.tensorboard import SummaryWriter
 
 # from accelerate import Accelerator
 
@@ -20,7 +23,11 @@ from latent_encoder import (
     load_from_pretrain,
     HalfFreezeW2VClassifier,
 )
-from audio_dataloader import get_labeled_dataloader
+from audio_dataloader import (
+    get_labeled_dataloader,
+    get_labeled_dataloader_split_by_speaker,
+    get_labeled_dataloader_manual_split,
+)
 from metric import create_metrics
 from optimizer import build_optimizer
 
@@ -90,6 +97,7 @@ class BaseTrainer:
         )
 
         self.metric_fn = create_metrics(metric_names=metrics, **metric_kwargs)
+
         self.encoder = SLIMEncoder()
         _ = self.encoder.freeze_encoders()
         _ = self.encoder.to(self.device)
@@ -109,7 +117,7 @@ class BaseTrainer:
         return round(int(mem_used_MB))
 
     def log_batch(self, batch):
-        inputs, labels = batch
+        inputs, labels, augs = batch
         speech = inputs.input_values[0]
         save_dir = self.checkpoint_dir / "example_audio/"
         if not save_dir.exists():
@@ -124,7 +132,7 @@ class BaseTrainer:
     def train_step(self, batch):
         self.optimizer.zero_grad()
 
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
         loss = None
         with torch.no_grad():
@@ -147,7 +155,7 @@ class BaseTrainer:
     def train_step_amp(self, batch):
         # print("using fp16")
 
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
 
         with torch.autocast(device_type=self.device, dtype=torch.float16):
@@ -172,7 +180,7 @@ class BaseTrainer:
 
     @torch.no_grad()
     def eval_step(self, batch):
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
         latent = self.encoder(
             inputs.input_values.to(self.device),
@@ -186,7 +194,7 @@ class BaseTrainer:
 
     @torch.no_grad()
     def eval_step_amp(self, batch):
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
 
         with torch.autocast(device_type=self.device, dtype=torch.float16):
@@ -286,7 +294,7 @@ class BaseTrainer:
             total_loss += float(loss.numpy())
 
             pbar.set_postfix({f"avg_loss_epoch_{epoch_num}": total_loss / (i + 1)})
-            batch_metric = self.metric_fn(predictions=logit, labels=batch[-1])
+            batch_metric = self.metric_fn(predictions=logit, labels=batch[1])
             for k, v in batch_metric.items():
                 metric_dict[k] += v
             avg_metric_dict = {
@@ -420,7 +428,7 @@ class RawAudioTrainer(BaseTrainer):
         pass
 
     def log_batch(self, batch):
-        inputs, labels = batch
+        inputs, labels, augs = batch
         speech = inputs[0]
         save_dir = self.checkpoint_dir / "example_audio/"
         if not save_dir.exists():
@@ -435,7 +443,7 @@ class RawAudioTrainer(BaseTrainer):
     def train_step(self, batch):
         self.optimizer.zero_grad()
 
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
 
         logit, loss = self.detector.calculate_loss(
@@ -448,7 +456,7 @@ class RawAudioTrainer(BaseTrainer):
 
     @torch.no_grad()
     def eval_step(self, batch):
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
 
         logit, loss = self.detector.calculate_loss(
@@ -540,7 +548,7 @@ class W2VTrainer(BaseTrainer):
     def train_step(self, batch):
         self.optimizer.zero_grad()
 
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
 
         logit, loss = self.detector.calculate_loss(
@@ -556,7 +564,7 @@ class W2VTrainer(BaseTrainer):
     def train_step_amp(self, batch):
         # print("using fp16")
 
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
 
         with torch.autocast(device_type=self.device, dtype=torch.float16):
@@ -579,7 +587,7 @@ class W2VTrainer(BaseTrainer):
 
     @torch.no_grad()
     def eval_step(self, batch):
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
 
         logit, loss = self.detector.calculate_loss(
@@ -591,7 +599,7 @@ class W2VTrainer(BaseTrainer):
 
     @torch.no_grad()
     def eval_step_amp(self, batch):
-        inputs, labels = batch
+        inputs, labels, augs = batch
         labels = labels.type(torch.LongTensor).to(self.device)
 
         with torch.autocast(device_type=self.device, dtype=torch.float16):
@@ -602,6 +610,258 @@ class W2VTrainer(BaseTrainer):
             )
 
         return logit.detach().float().cpu(), loss.detach().float().cpu()
+
+
+class ManualSplitTrainer(BaseTrainer):
+    def __init__(
+        self,
+        train_data_paths={"wm_data_dir": "", "tts_data_dir": "", "raw_audio_dir": ""},
+        eval_data_paths={"wm_data_dir": "", "tts_data_dir": "", "raw_audio_dir": ""},
+        detector_kwargs={},
+        batch_size=16,
+        sampling_rate=16000,
+        eval_split=0.1,
+        epochs=10,
+        metrics=["F1", "precision"],
+        metric_kwargs={},
+        scheduler_params_dict={},
+        device="cuda",
+        checkpoint_dir="",
+        num_epoch_per_checkpoint=2,
+        num_max_train_steps=None,
+        num_max_eval_steps=None,
+        num_batch_logged=10,
+        drop_raw_data=False,
+        clip_length=8,
+        fp16=False
+        # gradient_accumulation_steps=5
+    ):
+        self.num_batch_logged = num_batch_logged
+        self.num_max_train_steps = num_max_train_steps
+        self.num_max_eval_steps = num_max_eval_steps
+        self.fp16 = fp16
+        if self.fp16:
+            self.scaler = torch.amp.GradScaler("cuda")
+        else:
+            self.scaler = None
+
+        self.num_epoch_per_checkpoint = num_epoch_per_checkpoint
+        if not checkpoint_dir:
+            self.checkpoint_dir = checkpoint_dir
+        else:
+            self.checkpoint_dir = Path(checkpoint_dir)
+
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.sampling_rate = sampling_rate
+        self.device = device
+        self.eval_split = eval_split
+
+        (
+            self.train_dataloader,
+            self.eval_dataloader,
+        ) = get_labeled_dataloader_manual_split(
+            train_data_paths,
+            eval_data_paths,
+            sampling_rate=self.sampling_rate,
+            eval_split=self.eval_split,
+            batch_size=self.batch_size,
+            drop_raw_data=drop_raw_data,
+            clip_length=clip_length,
+        )
+
+        self.detector_kwargs = detector_kwargs
+        self.detector = BaseAudioSealClassifier(**detector_kwargs)
+        _ = self.detector.to(self.device)
+
+        scheduler_params_dict.update(
+            {"epochs": self.epochs, "steps_per_epoch": len(self.train_dataloader)}
+        )
+        self.optimizer, self.scheduler = build_optimizer(
+            self.detector, scheduler_params_dict
+        )
+
+        self.metric_fn = create_metrics(metric_names=metrics, **metric_kwargs)
+
+        self.encoder = SLIMEncoder()
+        _ = self.encoder.freeze_encoders()
+        _ = self.encoder.to(self.device)
+        # self.accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
+        # self.train_dataloader, self.detector, self.optimizer, self.scheduler = self.accelerator.prepare(
+        #     self.train_dataloader, self.detector,
+        #     self.optimizer, self.scheduler)
+
+        self.step = 0
+        self.logged_audio = 0
+        pass
+
+
+class SpeakerSplitTrainer(BaseTrainer):
+    def __init__(
+        self,
+        data_paths={"wm_data_dir": "", "tts_data_dir": "", "raw_audio_dir": ""},
+        detector_kwargs={},
+        batch_size=16,
+        sampling_rate=16000,
+        eval_split=0.1,
+        epochs=10,
+        metrics=["F1", "precision"],
+        metric_kwargs={},
+        scheduler_params_dict={},
+        device="cuda",
+        checkpoint_dir="",
+        num_epoch_per_checkpoint=2,
+        num_max_train_steps=None,
+        num_max_eval_steps=None,
+        num_batch_logged=10,
+        drop_raw_data=False,
+        clip_length=8,
+        fp16=False
+        # gradient_accumulation_steps=5
+    ):
+        self.num_batch_logged = num_batch_logged
+        self.num_max_train_steps = num_max_train_steps
+        self.num_max_eval_steps = num_max_eval_steps
+        self.fp16 = fp16
+        if self.fp16:
+            self.scaler = torch.amp.GradScaler("cuda")
+        else:
+            self.scaler = None
+
+        self.num_epoch_per_checkpoint = num_epoch_per_checkpoint
+        if not checkpoint_dir:
+            self.checkpoint_dir = checkpoint_dir
+        else:
+            self.checkpoint_dir = Path(checkpoint_dir)
+
+        self.epochs = epochs
+        self.batch_size = batch_size
+        self.sampling_rate = sampling_rate
+        self.device = device
+        self.eval_split = eval_split
+
+        (
+            self.train_dataloader,
+            self.eval_dataloader,
+        ) = get_labeled_dataloader_split_by_speaker(
+            data_paths,
+            sampling_rate=self.sampling_rate,
+            eval_split=self.eval_split,
+            batch_size=self.batch_size,
+            drop_raw_data=drop_raw_data,
+            clip_length=clip_length,
+        )
+
+        self.detector_kwargs = detector_kwargs
+        self.detector = BaseAudioSealClassifier(**detector_kwargs)
+        _ = self.detector.to(self.device)
+
+        scheduler_params_dict.update(
+            {"epochs": self.epochs, "steps_per_epoch": len(self.train_dataloader)}
+        )
+        self.optimizer, self.scheduler = build_optimizer(
+            self.detector, scheduler_params_dict
+        )
+
+        self.metric_fn = create_metrics(metric_names=metrics, **metric_kwargs)
+        self.encoder = SLIMEncoder()
+        _ = self.encoder.freeze_encoders()
+        _ = self.encoder.to(self.device)
+        # self.accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps)
+        # self.train_dataloader, self.detector, self.optimizer, self.scheduler = self.accelerator.prepare(
+        #     self.train_dataloader, self.detector,
+        #     self.optimizer, self.scheduler)
+
+        self.step = 0
+        self.logged_audio = 0
+        pass
+
+
+def get_TensorboardTrainer(class_name, tensorboard_logdir, **params):
+
+    import inspect
+
+    elements = inspect.getmembers(sys.modules[__name__], inspect.isclass)
+    element_dict = dict(elements)
+    trainer_dict = {k: v for k, v in element_dict.items() if k.endswith("Trainer")}
+
+    def log_plot_to_tensorboard(writer, data, global_step):
+        # Create a matplotlib figure for the plot
+        fig, ax = plt.subplots()
+        ax.bar(data.keys(), data.values())
+
+        # Adding labels and title
+        ax.set_xlabel("augmentations")
+        ax.set_ylabel("counts")
+        ax.set_title("distribution of augmentation used")
+
+        # Add the figure to TensorBoard
+        writer.add_figure("eval/aug_chart", fig, global_step)
+
+        # Optionally close the figure to free up resources
+        plt.close(fig)
+
+    class TensorboardTrainer(trainer_dict[class_name]):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.writer = SummaryWriter(log_dir=tensorboard_logdir)
+            self.epoch = 0
+
+        def train_step(self, batch):
+            loss = super().train_step(batch)
+            self.writer.add_scalar("train/Loss", loss, int(self.step))
+            return loss
+
+        def train_step_amp(self, batch):
+            loss = super().train_step_amp(batch)
+            self.writer.add_scalar("train/Loss", loss, int(self.step))
+            return loss
+
+        @torch.no_grad()
+        def eval_epoch(self, epoch_num):
+            self.detector.eval()
+            pbar = tqdm(
+                range(len(self.eval_dataloader)),
+                desc="Eval",
+                dynamic_ncols=True,
+                position=2,
+            )
+            total_loss = 0
+            metric_dict = defaultdict(float)
+            aug_count_dict = defaultdict(float)
+            for i, _ in enumerate(pbar):
+                batch = next(iter(self.eval_dataloader))
+                _, _, aug_names = batch
+                for n in aug_names:
+                    aug_count_dict[n] += 1
+
+                if not self.fp16:
+                    logit, loss = self.eval_step(batch)
+                else:
+                    logit, loss = self.eval_step_amp(batch)
+
+                total_loss += float(loss.numpy())
+
+                pbar.set_postfix({f"avg_loss_epoch_{epoch_num}": total_loss / (i + 1)})
+                batch_metric = self.metric_fn(predictions=logit, labels=batch[1])
+                for k, v in batch_metric.items():
+                    metric_dict[k] += v
+                avg_metric_dict = {k: v / (i + 1) for k, v in metric_dict.items()}
+                pbar.set_postfix(avg_metric_dict)
+                if (self.num_max_eval_steps is not None) and (
+                    i > self.num_max_eval_steps
+                ):
+                    break
+
+            self.writer.add_scalar("eval/Loss", total_loss / (i + 1), int(epoch_num))
+            log_plot_to_tensorboard(self.writer, aug_count_dict, int(epoch_num))
+
+            for k, v in avg_metric_dict.items():
+                self.writer.add_scalar(f"eval/{k}", v, int(epoch_num))
+
+            return round(float(total_loss / (i + 1)), 3)
+
+    return TensorboardTrainer(**params)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,9 @@
+import os
 from tqdm import tqdm
 import random
 from pathlib import Path
 import time
+from collections import defaultdict
 
 import numpy as np
 import torch
@@ -125,11 +127,46 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         batch = self.load_audio_to_batch(wav_path)
 
         batch["speech"] = self.random_clip(torch.from_numpy(batch["speech"])).numpy()
-        batch["speech"] = self.aug_fn(batch["speech"])
+        batch["speech"], batch["aug_name"] = self.aug_fn(batch["speech"])
 
         batch["label"] = data_sect
 
         return batch
+
+
+class WMCustomPathDataset(WMBinaryClassificationDataset):
+    def __init__(
+        self,
+        wm_data_paths: list,
+        tts_data_paths: list,
+        sampling_rate=16000,
+        clip_length=8,
+        drop_raw_data=False,
+        **kwargs,
+    ):
+
+        self.wm_data = wm_data_paths
+        self.tts_data = tts_data_paths
+        self.sampling_rate = sampling_rate
+
+        assert len(self.wm_data) == len(self.tts_data)
+
+        self.data_len = len(self.wm_data)
+
+        wm_iter = self.wm_data
+
+        non_wm_iter = self.tts_data
+
+        self.balance_data_list = list(zip(non_wm_iter, wm_iter))
+        self.data = list(zip(*self.balance_data_list))
+
+        assert len(self.data[0]) == self.data_len
+        assert len(self.data[1]) == self.data_len
+
+        self.random_clip = RandomClip(
+            self.sampling_rate, clip_length=self.sampling_rate * clip_length
+        )
+        self.aug_fn = RandomAudioAugmentation(sample_rate=self.sampling_rate)
 
 
 class W2VBaseCollator:
@@ -160,19 +197,32 @@ class RawAudioCollator:
             [torch.from_numpy(b["speech"]) for b in batch], batch_first=True
         ).float()
         labels = torch.LongTensor([int(b["label"]) for b in batch])
-        return audios, labels
+        return audios, labels, augmentations
 
 
 class W2VLabeledCollator(W2VBaseCollator):
     def __call__(self, batch):
         audios = [b["speech"] for b in batch]
+        augmentations = [b["aug_name"] for b in batch]
 
         labels = torch.LongTensor([int(b["label"]) for b in batch])
         inputs = self.feature_extractor(
             audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True
         )
 
-        return inputs, labels
+        return inputs, labels, augmentations
+
+
+def get_all_speaker_from_dir(data_dir):
+    data_dir = Path(data_dir)
+    all_wav_files = list(data_dir.glob("*.wav"))
+    all_speaker = [int(fp.name.split("_")[1]) for fp in all_wav_files]
+    all_speaker = set(all_speaker)
+    return all_speaker
+
+
+def get_speaker_wav_from_dir(speaker_id, data_dir):
+    return list(Path(data_dir).glob(f"spk_{speaker_id}*.wav"))
 
 
 def get_labeled_dataloader(
@@ -217,7 +267,221 @@ def get_labeled_dataloader(
     return train_dataloader, eval_dataloader
 
 
+def get_labeled_dataloader_manual_split(
+    train_data_paths,
+    eval_data_paths,
+    sampling_rate=16000,
+    eval_split=0.1,
+    batch_size=16,
+    drop_raw_data=False,
+    clip_length=8,
+    num_workers=16,
+    use_wav_feature=True,
+):
+    train_dataset = WMBinaryClassificationDataset(
+        sampling_rate=sampling_rate,
+        drop_raw_data=drop_raw_data,
+        clip_length=clip_length,
+        **train_data_paths,
+    )
+    eval_dataset = WMBinaryClassificationDataset(
+        sampling_rate=sampling_rate,
+        drop_raw_data=drop_raw_data,
+        clip_length=clip_length,
+        **eval_data_paths,
+    )
+
+    if use_wav_feature:
+        collate_fn = W2VLabeledCollator()
+    else:
+        collate_fn = RawAudioCollator()
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=True,  # num_workers=num_workers
+    )
+    eval_dataloader = DataLoader(
+        eval_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=False,  # num_workers=num_workers
+    )
+    return train_dataloader, eval_dataloader
+
+
+def get_labeled_dataloader_split_by_speaker(
+    data_paths,
+    sampling_rate=16000,
+    eval_split=0.1,
+    batch_size=16,
+    drop_raw_data=False,
+    clip_length=8,
+    num_workers=16,
+    use_wav_feature=True,
+):
+
+    all_wm_speaker = get_all_speaker_from_dir(data_paths["wm_data_dir"])
+    all_tts_speaker = get_all_speaker_from_dir(data_paths["tts_data_dir"])
+
+    assert all_wm_speaker == all_tts_speaker
+
+    all_wm_speaker = list(all_wm_speaker)
+    all_tts_speaker = list(all_tts_speaker)
+
+    num_speakers = len(all_tts_speaker)
+    num_eval_speakers = max(1, int(num_speakers * eval_split))
+
+    eval_speakers = random.sample(all_tts_speaker, num_eval_speakers)
+    train_speakers = set(all_wm_speaker) - set(eval_speakers)
+
+    if use_wav_feature:
+        collate_fn = W2VLabeledCollator()
+    else:
+        collate_fn = RawAudioCollator()
+
+    all_train_wm_path = sum(
+        [
+            get_speaker_wav_from_dir(speaker_id, data_paths["wm_data_dir"])
+            for speaker_id in train_speakers
+        ],
+        [],
+    )
+
+    all_train_tts_path = sum(
+        [
+            get_speaker_wav_from_dir(speaker_id, data_paths["tts_data_dir"])
+            for speaker_id in train_speakers
+        ],
+        [],
+    )
+
+    all_eval_wm_path = sum(
+        [
+            get_speaker_wav_from_dir(speaker_id, data_paths["wm_data_dir"])
+            for speaker_id in eval_speakers
+        ],
+        [],
+    )
+
+    all_eval_tts_path = sum(
+        [
+            get_speaker_wav_from_dir(speaker_id, data_paths["tts_data_dir"])
+            for speaker_id in eval_speakers
+        ],
+        [],
+    )
+
+    train_dataset = WMCustomPathDataset(
+        wm_data_paths=all_train_wm_path,
+        tts_data_paths=all_train_tts_path,
+        sampling_rate=sampling_rate,
+        drop_raw_data=drop_raw_data,
+        clip_length=clip_length,
+    )
+    eval_dataset = WMCustomPathDataset(
+        wm_data_paths=all_eval_wm_path,
+        tts_data_paths=all_eval_tts_path,
+        sampling_rate=sampling_rate,
+        drop_raw_data=drop_raw_data,
+        clip_length=clip_length,
+    )
+
+    train_dataloader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=True,  # num_workers=num_workers
+    )
+    eval_dataloader = DataLoader(
+        eval_dataset,
+        batch_size=batch_size,
+        collate_fn=collate_fn,
+        shuffle=False,  # num_workers=num_workers
+    )
+
+    return train_dataloader, eval_dataloader
+
+
+def create_directory(dir_path):
+    if not dir_path.exists():
+        dir_path.mkdir()
+    return dir_path
+
+
+def split_dataset(data_paths, data_split_dir="", eval_split=0.05):
+    data_split_dir = Path(data_split_dir)
+    if not data_split_dir.exists():
+        data_split_dir.mkdir()
+
+    eval_dir = create_directory(data_split_dir / "eval")
+    train_dir = create_directory(data_split_dir / "train")
+
+    wm_eval_dir = create_directory(eval_dir / "watermarked")
+    tts_eval_dir = create_directory(eval_dir / "original")
+
+    wm_train_dir = create_directory(train_dir / "watermarked")
+    tts_train_dir = create_directory(train_dir / "original")
+
+    wm_data_dir = Path(data_paths["wm_data_dir"])
+    tts_data_dir = Path(data_paths["tts_data_dir"])
+    all_valid_fname = []
+
+    for wm_file in wm_data_dir.glob("*.wav"):
+        wm_fname = wm_file.name
+        if not (tts_data_dir / wm_fname).exists():
+            continue
+        all_valid_fname.append(wm_fname)
+
+    num_eval_data = max(len(all_valid_fname) * eval_split, 1)
+
+    all_wm_speaker = get_all_speaker_from_dir(data_paths["wm_data_dir"])
+    data_per_speaker = max(int(num_eval_data // len(all_wm_speaker)), 1)
+
+    num_eval_data = int(data_per_speaker * len(all_wm_speaker))
+
+    print(
+        f"number of evaluation data: {num_eval_data}, data_per_speaker: {data_per_speaker}"
+    )
+    all_speaker_dict = defaultdict(list)
+
+    for fname in all_valid_fname:
+        all_speaker_dict[int(fname.split("_")[1])].append(fname)
+
+    all_sampled_data = []
+    for speaker_id in all_wm_speaker:
+        all_speaker_fname = all_speaker_dict[int(speaker_id)]
+        sampled_data = random.sample(all_speaker_fname, data_per_speaker)
+        all_sampled_data += sampled_data
+
+    all_sampled_data = set(all_sampled_data)
+
+    for fname in all_valid_fname:
+        wm_fname = (wm_data_dir / fname).absolute()
+        tts_fname = (tts_data_dir / fname).absolute()
+
+        if fname in all_sampled_data:
+            os.symlink(wm_fname, (wm_eval_dir / fname).absolute())
+            os.symlink(tts_fname, (tts_eval_dir / fname).absolute())
+            continue
+        os.symlink(wm_fname, (wm_train_dir / fname).absolute())
+        os.symlink(tts_fname, (tts_train_dir / fname).absolute())
+
+
 if __name__ == "__main__":
+    data_paths = {
+        # "wm_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_watermarked",
+        "wm_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/watermarked",
+        # "tts_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train",
+        "tts_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/original",
+        # "raw_audio_dir": "/home/tst000/projects/datasets/LibriTTS/train-clean-100",
+        "raw_audio_dir": "",
+    }
+    data_split_dir = "/home/tst000/projects/datasets/LibriTTS_synthesize/manual_splited_train_dataset_parallel"
+    split_dataset(data_paths, data_split_dir=data_split_dir, eval_split=0.05)
+    exit()
+
     dummy_dataset = "/home/tst000/projects/LatentGroot/test/dummy_dataset"
     dummy_tts_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
     dummy_raw_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
