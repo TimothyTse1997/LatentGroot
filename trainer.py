@@ -322,7 +322,7 @@ class BaseTrainer:
 
     def load_checkpoint(self, pretrained_checkpoint_path):
         self.detector.load_state_dict(
-            torch.load(pretrained_checkpoint_path, weight_only=True)
+            torch.load(pretrained_checkpoint_path)  # , weight_only=True)
         )
 
     def fit(self):

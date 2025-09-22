@@ -34,6 +34,7 @@ class FixNoiseWatermark:
 
     def load_original_noise(self, save_path):
         self.fix_noise = torch.load(save_path)
+        print("load noise from:", save_path)
 
     @torch.no_grad()
     def __call__(self, y0, **kwargs):
@@ -140,10 +141,12 @@ def main_parallel(
     num_audio_per_speaker=200,
     noise_update_fn=None,
     fix_codec=[0, 1, 0, 1, 0, 1, 0, 1, 0, 1],
+    text_dataset=None,
 ):
-    text_dataset = load_dataset("agentlans/high-quality-english-sentences")["test"][
-        "text"
-    ]
+    if text_dataset is None:
+        text_dataset = load_dataset("agentlans/high-quality-english-sentences")["test"][
+            "text"
+        ]
 
     if not output_dir.exists():
         output_dir.mkdir(parents=True)
@@ -169,9 +172,13 @@ def main_parallel(
 
         # for i, ref_file in enumerate(ref_files):
         for i, audio_id in enumerate(tqdm(range(num_audio_per_speaker), position=1)):
+            text = str(text_dataset[text_id])
+            while "[NAME]" in text:
+                text_id += 1
+                text = str(text_dataset[text_id])
+
             ref_file_id = audio_id % len(ref_files)
             ref_file = ref_files[ref_file_id]
-            text = str(text_dataset[text_id])
 
             f5tts.ema_model.noise_update_fn = None
 
@@ -284,16 +291,25 @@ if __name__ == "__main__":
     # noise_save_path
 
     fix_noise_wm_fn = FixNoiseWatermark()
-    fix_noise_wm_fn.save_original_noise(
+    # fix_noise_wm_fn.save_original_noise(
+    #    "/home/tst000/projects/datasets/LibriTTS_synthesize/wm_noise.pt"
+    # )
+
+    fix_noise_wm_fn.load_original_noise(
         "/home/tst000/projects/datasets/LibriTTS_synthesize/wm_noise.pt"
     )
+
+    unseen_text_dataset = "jakeazcona/short-text-labeled-emotion-classification"
+    unseen_dataset = load_dataset(unseen_text_dataset)["train"]["sample"]
     main_parallel(
         tts_dataset_path=Path(
             "/home/tst000/projects/datasets/LibriTTS/train-clean-100/"
         ),
         output_dir=Path(
-            "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise_2/"
+            "/home/tst000/projects/datasets/LibriTTS_synthesize/eval_parallel_watermarked_fix_noise_2/"
         ),
         noise_update_fn=fix_noise_wm_fn,
+        text_dataset=unseen_dataset,
+        num_audio_per_speaker=10,
     )
     # main_parallel_load_from_meta()

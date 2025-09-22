@@ -153,12 +153,12 @@ class SLIMEncoder(nn.Module):
         self.style_encoder = Wav2Vec2ForSequenceClassification.from_pretrained(
             "r-f/wav2vec-english-speech-emotion-recognition",
             local_files_only=True,
-            attn_implementation="sdpa",
+            # attn_implementation="sdpa",
         )
         self.ling_encoder = Wav2Vec2ForCTC.from_pretrained(
             "jonatasgrosman/wav2vec2-large-xlsr-53-english",
             local_files_only=True,
-            attn_implementation="sdpa",
+            # attn_implementation="sdpa",
         )
         self.freeze_encoders()
 

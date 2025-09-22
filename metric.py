@@ -56,7 +56,7 @@ class F1Metric(BaseMetric):
 
     def get_metric_f1(self, predictions=None, labels=None, **kwargs):
         result = {
-            f"f1": float(
+            "f1": float(
                 multiclass_f1_score(predictions, labels, num_classes=2)
                 .detach()
                 .cpu()

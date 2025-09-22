@@ -130,7 +130,68 @@ class WMBinaryClassificationDataset(BaseAudioDataset):
         batch["speech"], batch["aug_name"] = self.aug_fn(batch["speech"])
 
         batch["label"] = data_sect
+        batch["wav_path"] = str(
+            wav_path.absolute()
+        )  # f"{wav_path.parent.name}/{wav_path.name}"
+        return batch
 
+
+class WMBinaryClassificationDatasetV2(BaseAudioDataset):
+    def __init__(
+        self,
+        wm_data_dir,
+        tts_data_dir,
+        sampling_rate=16000,
+        clip_length=8,
+        skip_aug=False,
+        **kwargs,
+    ):
+        print("Using simplified data pipeline")
+        self.wm_data_dir = Path(wm_data_dir)
+        self.tts_data_dir = Path(tts_data_dir)
+
+        self.sampling_rate = sampling_rate
+
+        self.wm_data = self.get_audio_dir_paths(self.wm_data_dir)
+        self.tts_data = self.get_audio_dir_paths(self.tts_data_dir)
+
+        self.data_len = min(len(self.wm_data), len(self.tts_data))
+
+        self.data = self.wm_data[: self.data_len] + self.tts_data[: self.data_len]
+        self.label = [0 for _ in range(self.data_len)] + [
+            1 for _ in range(self.data_len)
+        ]
+        assert len(self.data) == len(self.label)
+
+        self.random_clip = RandomClip(
+            self.sampling_rate, clip_length=self.sampling_rate * clip_length
+        )
+        if not skip_aug:
+            self.aug_fn = RandomAudioAugmentation(sample_rate=self.sampling_rate)
+        else:
+            self.aug_fn = lambda x: (x, "default")
+
+    def get_audio_dir_paths(self, audio_dir):
+        return list(audio_dir.glob("*.wav"))  # + list(raw_audio_dir.glob("**/*.wav"))
+
+    def __len__(self):
+        return len(self.data)
+
+    def __getitem__(self, index):
+        # print(index, self.data_len, data_sect)
+        # print(index, self.data_len, data_id)
+        # print(len(self.data[data_sect]))
+
+        wav_path = self.data[index]
+        batch = self.load_audio_to_batch(wav_path)
+
+        batch["speech"] = self.random_clip(torch.from_numpy(batch["speech"])).numpy()
+        batch["speech"], batch["aug_name"] = self.aug_fn(batch["speech"])
+
+        batch["label"] = self.label[index]
+        batch["wav_path"] = str(
+            wav_path.absolute()
+        )  # f"{wav_path.parent.name}/{wav_path.name}"
         return batch
 
 
@@ -201,14 +262,21 @@ class RawAudioCollator:
 
 
 class W2VLabeledCollator(W2VBaseCollator):
+    def __init__(self, *args, return_wav_paths=False, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.return_wav_paths = return_wav_paths
+
     def __call__(self, batch):
         audios = [b["speech"] for b in batch]
         augmentations = [b["aug_name"] for b in batch]
+        wav_paths = [b["wav_path"] for b in batch]
 
         labels = torch.LongTensor([int(b["label"]) for b in batch])
         inputs = self.feature_extractor(
             audios, sampling_rate=self.sampling_rate, return_tensors="pt", padding=True
         )
+        if self.return_wav_paths:
+            return inputs, labels, augmentations, wav_paths
 
         return inputs, labels, augmentations
 
@@ -278,13 +346,15 @@ def get_labeled_dataloader_manual_split(
     num_workers=16,
     use_wav_feature=True,
 ):
-    train_dataset = WMBinaryClassificationDataset(
+    # train_dataset = WMBinaryClassificationDataset(
+    train_dataset = WMBinaryClassificationDatasetV2(
         sampling_rate=sampling_rate,
         drop_raw_data=drop_raw_data,
         clip_length=clip_length,
         **train_data_paths,
     )
-    eval_dataset = WMBinaryClassificationDataset(
+    # eval_dataset = WMBinaryClassificationDataset(
+    eval_dataset = WMBinaryClassificationDatasetV2(
         sampling_rate=sampling_rate,
         drop_raw_data=drop_raw_data,
         clip_length=clip_length,
@@ -469,39 +539,141 @@ def split_dataset(data_paths, data_split_dir="", eval_split=0.05):
         os.symlink(tts_fname, (tts_train_dir / fname).absolute())
 
 
-if __name__ == "__main__":
-    data_paths = {
-        # "wm_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_watermarked",
-        "wm_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/watermarked",
-        # "tts_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train",
-        "tts_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/original",
-        # "raw_audio_dir": "/home/tst000/projects/datasets/LibriTTS/train-clean-100",
-        "raw_audio_dir": "",
-    }
-    data_split_dir = "/home/tst000/projects/datasets/LibriTTS_synthesize/manual_splited_train_dataset_parallel"
-    split_dataset(data_paths, data_split_dir=data_split_dir, eval_split=0.05)
-    exit()
+def split_and_symlink(
+    original_data_dir, symlink_train_dir, symlink_eval_dir, eval_split=0.05
+):
 
-    dummy_dataset = "/home/tst000/projects/LatentGroot/test/dummy_dataset"
-    dummy_tts_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
-    dummy_raw_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
+    all_wav = list(original_data_dir.glob("*.wav"))
+    random.shuffle(all_wav)
+
+    num_eval = max(1, int(len(all_wav) * eval_split))
+    eval_data_path, train_data_path = all_wav[:num_eval], all_wav[num_eval:]
+
+    for p in eval_data_path:
+        os.symlink(p.absolute(), (symlink_eval_dir / p.name).absolute())
+
+    for p in train_data_path:
+        os.symlink(p.absolute(), (symlink_train_dir / p.name).absolute())
+
+
+def split_dataset_ignore_speaker(data_paths, data_split_dir="", eval_split=0.05):
+    data_split_dir = Path(data_split_dir)
+    if not data_split_dir.exists():
+        data_split_dir.mkdir()
+
+    eval_dir = create_directory(data_split_dir / "eval")
+    train_dir = create_directory(data_split_dir / "train")
+
+    wm_eval_dir = create_directory(eval_dir / "watermarked")
+    tts_eval_dir = create_directory(eval_dir / "original")
+
+    wm_train_dir = create_directory(train_dir / "watermarked")
+    tts_train_dir = create_directory(train_dir / "original")
+
+    wm_data_dir = Path(data_paths["wm_data_dir"])
+    tts_data_dir = Path(data_paths["tts_data_dir"])
+
+    split_and_symlink(wm_data_dir, wm_train_dir, wm_eval_dir, eval_split=eval_split)
+    split_and_symlink(tts_data_dir, tts_train_dir, tts_eval_dir, eval_split=eval_split)
+
+
+def create_non_overlap_dataset(data_paths, data_split_dir="", eval_split=0.05):
+    data_split_dir = Path(data_split_dir)
+    if not data_split_dir.exists():
+        data_split_dir.mkdir()
+
+    eval_dir = create_directory(data_split_dir / "eval")
+    train_dir = create_directory(data_split_dir / "train")
+
+    wm_eval_dir = create_directory(eval_dir / "watermarked")
+    tts_eval_dir = create_directory(eval_dir / "original")
+
+    wm_train_dir = create_directory(train_dir / "watermarked")
+    tts_train_dir = create_directory(train_dir / "original")
+
+    wm_data_dir = Path(data_paths["wm_data_dir"])
+    tts_data_dir = Path(data_paths["tts_data_dir"])
+
+    # spk_911_txt_40370_ref_170.wav
+    all_fname = [str(fp.name) for fp in wm_data_dir.glob("*.wav")]
+    # all_text_id = set([int(fn.split("_")[3]) for fn in all_fname])
+    text_id_dict = defaultdict(list)
+
+    for fn in all_fname:
+        text_id_dict[int(fn.split("_")[3])].append(fn)
+
+    num_data = len(text_id_dict.keys())
+    num_eval = max(1, int(num_data * eval_split))
+
+    for i, (text_id, file_names) in enumerate(text_id_dict.items()):
+        file_name = random.choice(file_names)
+        if i <= num_eval:
+            current_path = wm_data_dir / file_name
+            symlink_path = wm_eval_dir / file_name
+            os.symlink(current_path.absolute(), symlink_path.absolute())
+
+            current_path = tts_data_dir / file_name
+            symlink_path = tts_eval_dir / file_name
+            os.symlink(current_path.absolute(), symlink_path.absolute())
+            continue
+
+        if i % 2 == 0:
+            current_path = wm_data_dir / file_name
+            symlink_path = wm_train_dir / file_name
+        else:
+            current_path = tts_data_dir / file_name
+            symlink_path = tts_train_dir / file_name
+
+        os.symlink(current_path.absolute(), symlink_path.absolute())
+
+    all_wm_text_id = set(
+        [int(fp.name.split("_")[3]) for fp in wm_train_dir.glob("*.wav")]
+    )
+    all_tts_text_id = set(
+        [int(fp.name.split("_")[3]) for fp in tts_train_dir.glob("*.wav")]
+    )
+
+    assert not all_wm_text_id & all_tts_text_id
+
+
+if __name__ == "__main__":
+    # data_paths = {
+    #    # "wm_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_watermarked",
+    #    "wm_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/watermarked",
+    #    # "tts_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train",
+    #    "tts_data_dir": "/home/tst000/projects/datasets/LibriTTS_synthesize/train_parallel_watermarked_fix_noise/original",
+    #    # "raw_audio_dir": "/home/tst000/projects/datasets/LibriTTS/train-clean-100",
+    #    "raw_audio_dir": "",
+    # }
+    # data_split_dir = "/home/tst000/projects/datasets/LibriTTS_synthesize/manual_splited_train_dataset_unique_text"
+    # split_dataset(data_paths, data_split_dir=data_split_dir, eval_split=0.05)
+    # split_dataset_ignore_speaker(data_paths, data_split_dir=data_split_dir, eval_split=0.05)
+    # create_non_overlap_dataset(data_paths, data_split_dir=data_split_dir, eval_split=0.05)
+    # exit()
+
+    dummy_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
+    dummy_tts_dataset = "/home/tst000/projects/LatentGroot/test/dummy_dataset"
+    # dummy_raw_dataset = "/home/tst000/projects/LatentGroot/test/dummy_wm_dataset"
 
     # dataset = BaseAudioDataset(dataset_dir=dummy_dataset)
     wm_dataset = WMBinaryClassificationDataset(
+        # wm_dataset = WMBinaryClassificationDatasetV2(
         wm_data_dir=dummy_dataset,
         tts_data_dir=dummy_tts_dataset,
-        raw_audio_dir=dummy_raw_dataset,
+        # raw_audio_dir=dummy_raw_dataset,
+        raw_audio_dir="",
         drop_raw_data=True,
         clip_length=5,
     )
 
     # collate_fn = RawAudioCollator()
-    collate_fn = W2VLabeledCollator()
+    collate_fn = W2VLabeledCollator(return_wav_paths=True)
     debug_dataloader = DataLoader(
-        wm_dataset, batch_size=32, collate_fn=collate_fn, shuffle=True
+        wm_dataset, batch_size=32, collate_fn=collate_fn, shuffle=False
     )
-    for i in tqdm(range(100)):
-        inputs, labels = next(iter(debug_dataloader))
-        print(inputs)
+    for i in tqdm(range(10)):
+        out = next(iter(debug_dataloader))
+        print(out)
+        # print(inputs)
         # print(inputs.attention_mask.shape)
         # print(labels.shape)
